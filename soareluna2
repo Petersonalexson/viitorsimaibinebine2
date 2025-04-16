@@ -8,14 +8,12 @@ import io
 from pathlib import Path
 from datetime import datetime, date
 from typing import Dict, Set, List, Tuple
-
+import math
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import customtkinter as ctk
-
 import pandas as pd
 import numpy as np
-
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
@@ -161,48 +159,6 @@ def read_xrp_excel(path: Path) -> pd.DataFrame:
         logging.error(f"read_xrp_excel => {e}")
         return pd.DataFrame()
 
-def meltdown_xrp_for_preview(df: pd.DataFrame, param: Dict[str, object]) -> pd.DataFrame:
-    if "V_S_C" not in df.columns:
-        logging.warning("XRP meltdown => 'V_S_C' missing => returning empty.")
-        return pd.DataFrame()
-    keep = param["dim_xrp_keep"]
-    dmap = param["dim_xrp_map"]
-    amap = param["attr_xrp_map"]
-    df2 = df[df["V_S_C"].isin(keep)].copy()
-    if df2.empty:
-        return pd.DataFrame()
-    skip_cols = {"V_S_C"}
-    id_vars = []
-    if "Value" in df2.columns:
-        id_vars.append("Value")
-        skip_cols.add("Value")
-    df2["DimRaw"] = df2["V_S_C"]
-    skip_cols.add("DimRaw")
-    id_vars.insert(0, "DimRaw")
-    meltdown_cols = [c for c in df2.columns if c not in skip_cols]
-    melted = df2.melt(id_vars=id_vars, value_vars=meltdown_cols, var_name="OrigAttr", value_name="ValX")
-    def rename_dim(v):
-        return dmap.get(v, v)
-    melted["Dimension"] = melted["DimRaw"].apply(rename_dim)
-    if "Value" in id_vars:
-        melted.rename(columns={"Value": "Name"}, inplace=True)
-    else:
-        melted["Name"] = ""
-    melted = melted[melted["OrigAttr"].isin(amap.keys())].copy()
-    melted["Attribute"] = melted["OrigAttr"].map(amap)
-    def standardize_value(val, attr):
-        if pd.isna(val):
-            return ""
-        val_str = str(val).strip()
-        if attr in ["Start Date", "End Date"] and "T" in val_str:
-            return val_str.split("T")[0]
-        return val_str
-    melted["Value"] = melted.apply(
-        lambda x: standardize_value(x["ValX"], x["Attribute"]),
-        axis=1
-    )
-    return melted[["Dimension", "Name", "Attribute", "Value"]]
-
 def try_read_csv_bytes(raw: bytes) -> pd.DataFrame:
     encs = ["utf-8-sig", "utf-16-le", "utf-16-be", "cp1252", "latin-1", "ascii"]
     for e in encs:
@@ -281,6 +237,76 @@ def unify_master_csvs(csvs: List[Path]) -> pd.DataFrame:
         return pd.concat(frames, ignore_index=True)
     return pd.DataFrame()
 
+def standardize_value(val, attr):
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return ""
+    try:
+        if isinstance(val, (int, float)):
+            if val == int(val):
+                return str(int(val))
+            else:
+                return str(float(val))
+        val_str = str(val).strip()
+        tmp = val_str.replace('.', '', 1).replace('-', '', 1)
+        if tmp.isdigit():
+            num_val = float(val_str)
+            if num_val == int(num_val):
+                return str(int(num_val))
+            else:
+                return str(num_val)
+    except:
+        pass
+    val_str = str(val).strip()
+    if attr in ["Start Date", "End Date"] and "T" in val_str:
+        return val_str.split("T")[0]
+    return val_str
+
+def are_values_equivalent(val1, val2):
+    if val1 == val2:
+        return True
+    try:
+        tmp1 = val1.replace('.', '', 1).replace('-', '', 1)
+        tmp2 = val2.replace('.', '', 1).replace('-', '', 1)
+        if tmp1.isdigit() and tmp2.isdigit():
+            f1 = float(val1)
+            f2 = float(val2)
+            return f1 == f2
+    except:
+        pass
+    return val1.strip() == val2.strip()
+
+def meltdown_xrp_for_preview(df: pd.DataFrame, param: Dict[str, object]) -> pd.DataFrame:
+    if "V_S_C" not in df.columns:
+        logging.warning("XRP meltdown => 'V_S_C' missing => returning empty.")
+        return pd.DataFrame()
+    keep = param["dim_xrp_keep"]
+    dmap = param["dim_xrp_map"]
+    amap = param["attr_xrp_map"]
+    df2 = df[df["V_S_C"].isin(keep)].copy()
+    if df2.empty:
+        return pd.DataFrame()
+    skip_cols = {"V_S_C"}
+    id_vars = []
+    if "Value" in df2.columns:
+        id_vars.append("Value")
+        skip_cols.add("Value")
+    df2["DimRaw"] = df2["V_S_C"]
+    skip_cols.add("DimRaw")
+    id_vars.insert(0, "DimRaw")
+    meltdown_cols = [c for c in df2.columns if c not in skip_cols]
+    melted = df2.melt(id_vars=id_vars, value_vars=meltdown_cols, var_name="OrigAttr", value_name="ValX")
+    def rename_dim(v):
+        return dmap.get(v, v)
+    melted["Dimension"] = melted["DimRaw"].apply(rename_dim)
+    if "Value" in id_vars:
+        melted.rename(columns={"Value": "Name"}, inplace=True)
+    else:
+        melted["Name"] = ""
+    melted = melted[melted["OrigAttr"].isin(amap.keys())].copy()
+    melted["Attribute"] = melted["OrigAttr"].map(amap)
+    melted["Value"] = melted.apply(lambda x: standardize_value(x["ValX"], x["Attribute"]), axis=1)
+    return melted[["Dimension", "Name", "Attribute", "Value"]]
+
 def meltdown_master_for_preview(df: pd.DataFrame, param: Dict[str, object]) -> pd.DataFrame:
     if df.empty or "RawFileName" not in df.columns:
         return pd.DataFrame()
@@ -306,17 +332,7 @@ def meltdown_master_for_preview(df: pd.DataFrame, param: Dict[str, object]) -> p
         melted["Name"] = ""
     melted = melted[melted["OrigAttr"].isin(amap.keys())].copy()
     melted["Attribute"] = melted["OrigAttr"].map(amap)
-    def standardize_value(val, attr):
-        if pd.isna(val):
-            return ""
-        val_str = str(val).strip()
-        if attr in ["Start Date", "End Date"] and "T" in val_str:
-            return val_str.split("T")[0]
-        return val_str
-    melted["Value"] = melted.apply(
-        lambda x: standardize_value(x["ValX"], x["Attribute"]),
-        axis=1
-    )
+    melted["Value"] = melted.apply(lambda x: standardize_value(x["ValX"], x["Attribute"]), axis=1)
     return melted[["Dimension", "Name", "Attribute", "Value"]]
 
 def pivot_for_preview(df: pd.DataFrame) -> pd.DataFrame:
@@ -363,12 +379,10 @@ def merge_exceptions(df: pd.DataFrame, df_exc: pd.DataFrame) -> pd.DataFrame:
     hide_series = merged.get("Hide Exception", "").fillna("").str.lower()
     merged = merged[hide_series != "yes"].copy()
     if "Comments_1_exc" in merged.columns:
-        merged["Comments_1"] = np.where(merged["Comments_1_exc"].fillna("").str.strip() != "",
-                                        merged["Comments_1_exc"], merged["Comments_1"])
+        merged["Comments_1"] = np.where(merged["Comments_1_exc"].fillna("").str.strip() != "", merged["Comments_1_exc"], merged["Comments_1"])
         merged.drop(columns=["Comments_1_exc"], inplace=True)
     if "Comments_2_exc" in merged.columns:
-        merged["Comments_2"] = np.where(merged["Comments_2_exc"].fillna("").str.strip() != "",
-                                        merged["Comments_2_exc"], merged["Comments_2"])
+        merged["Comments_2"] = np.where(merged["Comments_2_exc"].fillna("").str.strip() != "", merged["Comments_2_exc"], merged["Comments_2"])
         merged.drop(columns=["Comments_2_exc"], inplace=True)
     if "Hide Exception" in merged.columns:
         merged.drop(columns=["Hide Exception"], inplace=True)
@@ -442,34 +456,37 @@ def compare_name_first(xrp_long: pd.DataFrame, mast_long: pd.DataFrame, trim_key
             name_issue = True
         else:
             if "Name" in e_map and "Name" in m_map:
-                e_name = e_map["Name"]
-                m_name = m_map["Name"]
-                if e_name == m_name:
+                ev = e_map["Name"]
+                mv = m_map["Name"]
+                ev_str = standardize_value(ev, "Name")
+                mv_str = standardize_value(mv, "Name")
+                if are_values_equivalent(ev_str, mv_str):
                     pass
-                elif e_name and m_name and e_name.lower() == m_name.lower():
-                    row = {
-                        "Dimension": dim, "Name": nm, "Attribute": "Name",
-                        "Master": m_name, "XRP": e_name,
-                        "Comments_1": "", "Comments_2": "",
-                        "Status": "CASE"
-                    }
-                    raw_key = f"{dim}|{nm}|Name|{m_name}|{e_name}".upper()
-                    if trim_key:
-                        raw_key = raw_key.replace(" ", "")
-                    row["Key"] = raw_key
-                    case_rows.append(row)
                 else:
-                    row = {
-                        "Dimension": dim, "Name": nm, "Attribute": "Name",
-                        "Master": m_name, "XRP": e_name,
-                        "Comments_1": "", "Comments_2": "",
-                        "Status": "Difference in both"
-                    }
-                    raw_key = f"{dim}|{nm}|Name|{m_name}|{e_name}".upper()
-                    if trim_key:
-                        raw_key = raw_key.replace(" ", "")
-                    row["Key"] = raw_key
-                    mismatch_rows.append(row)
+                    if ev_str and mv_str and ev_str.lower() == mv_str.lower():
+                        row = {
+                            "Dimension": dim, "Name": nm, "Attribute": "Name",
+                            "Master": mv, "XRP": ev,
+                            "Comments_1": "", "Comments_2": "",
+                            "Status": "CASE"
+                        }
+                        raw_key = f"{dim}|{nm}|Name|{mv}|{ev}".upper()
+                        if trim_key:
+                            raw_key = raw_key.replace(" ", "")
+                        row["Key"] = raw_key
+                        case_rows.append(row)
+                    else:
+                        row = {
+                            "Dimension": dim, "Name": nm, "Attribute": "Name",
+                            "Master": mv, "XRP": ev,
+                            "Comments_1": "", "Comments_2": "",
+                            "Status": "Difference in both"
+                        }
+                        raw_key = f"{dim}|{nm}|Name|{mv}|{ev}".upper()
+                        if trim_key:
+                            raw_key = raw_key.replace(" ", "")
+                        row["Key"] = raw_key
+                        mismatch_rows.append(row)
                 name_issue = True
             elif "Name" not in e_map and "Name" in m_map:
                 m_name = m_map["Name"]
@@ -505,39 +522,25 @@ def compare_name_first(xrp_long: pd.DataFrame, mast_long: pd.DataFrame, trim_key
             all_atts = set(e_map.keys()) | set(m_map.keys())
             all_atts.discard("Name")
             for at in all_atts:
-                ev = e_map.get(at, "")
-                mv = m_map.get(at, "")
-                ev_str = str(ev).strip() if ev is not None else ""
-                mv_str = str(mv).strip() if mv is not None else ""
-                if ev == mv:
+                ev_val = e_map.get(at, "")
+                mv_val = m_map.get(at, "")
+                ev_str = standardize_value(ev_val, at)
+                mv_str = standardize_value(mv_val, at)
+                if are_values_equivalent(ev_str, mv_str):
                     continue
-                elif ev_str == mv_str and ev_str and mv_str:
-                    continue
-                elif ev_str.lower() == mv_str.lower() and ev_str and mv_str:
-                    row = {
-                        "Dimension": dim, "Name": nm, "Attribute": at,
-                        "Master": mv, "XRP": ev,
-                        "Comments_1": "", "Comments_2": "",
-                        "Status": "CASE"
-                    }
-                    raw_key = f"{dim}|{nm}|{at}|{mv}|{ev}".upper()
-                    if trim_key:
-                        raw_key = raw_key.replace(" ", "")
-                    row["Key"] = raw_key
-                    case_rows.append(row)
                 else:
-                    if ev and not mv:
+                    if ev_str and not mv_str:
                         st = "Missing in Master"
                         ms = ""
-                        es = ev
-                    elif mv and not ev:
+                        es = ev_val
+                    elif mv_str and not ev_str:
                         st = "Missing in XRP"
-                        ms = mv
+                        ms = mv_val
                         es = ""
                     else:
                         st = "Difference in both"
-                        ms = mv
-                        es = ev
+                        ms = mv_val
+                        es = ev_val
                     row = {
                         "Dimension": dim, "Name": nm, "Attribute": at,
                         "Master": ms, "XRP": es,
@@ -863,7 +866,7 @@ class EnhancedPDFReport:
             ax.plot([i, i], [l_, h_], color="black", linewidth=1)
             body_low = min(o_, c_)
             body_high = max(o_, c_)
-            ax.add_patch(Rectangle((i-0.3, body_low), 0.6, body_high-body_low, fill=True, color=color, alpha=0.4))
+            ax.add_patch(Rectangle((i-0.3, body_low), 0.6, body_high - body_low, fill=True, color=color, alpha=0.4))
         sc = ax.scatter(xvals, date_ct["Count"], color="blue", label="Count", zorder=3)
         ax.set_xticks(xvals)
         xlabels = [d.strftime("%Y-%m-%d") if not pd.isna(d) else "" for d in date_ct["RunDate_dt"]]
@@ -894,15 +897,20 @@ class EnhancedPDFReport:
         tb.update()
         canvas.get_tk_widget().pack(fill="both", expand=True)
         plt.close(fig)
+    def clear_frame(self, frame: ctk.CTkFrame):
+        for w in frame.winfo_children():
+            w.destroy()
 
 class SimplePreview(ctk.CTkFrame):
     FILTERABLE = {"Start Date", "End Date"}
-    def __init__(self, parent, name: str, cfg_sub: Dict):
+    def __init__(self, parent, name: str, cfg_sub: Dict, has_enabled_toggle: bool=False):
         super().__init__(parent)
         self.name = name
         self.df = pd.DataFrame()
         self.filters: Dict[str, Set[str]] = {}
         self.future_var = tk.BooleanVar(value=False)
+        self.enabled_only_var = tk.BooleanVar(value=False)
+        self.has_enabled_toggle = has_enabled_toggle
         if "filters" in cfg_sub:
             for col, arr in cfg_sub["filters"].items():
                 if isinstance(arr, list):
@@ -915,6 +923,8 @@ class SimplePreview(ctk.CTkFrame):
         top.pack(fill="x", padx=5, pady=5)
         ctk.CTkLabel(top, text=f"{self.name} Preview", fg_color="#800020", corner_radius=8, text_color="white", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=5)
         ctk.CTkCheckBox(top, text="Future End Date?", variable=self.future_var, command=self.refresh_table, fg_color="#800020", hover_color="#a52a2a", text_color="black").pack(side="left", padx=5)
+        if self.has_enabled_toggle:
+            ctk.CTkCheckBox(top, text="Enabled Only?", variable=self.enabled_only_var, command=self.refresh_table, fg_color="#800020", hover_color="#a52a2a", text_color="black").pack(side="left", padx=5)
         ctk.CTkButton(top, text="Clear Date Filters", command=self.clear_filters, fg_color="#800020", hover_color="#a52a2a", text_color="white").pack(side="left", padx=5)
         container = ctk.CTkFrame(self)
         container.pack(fill="both", expand=True)
@@ -1000,6 +1010,9 @@ class SimplePreview(ctk.CTkFrame):
                 if keep:
                     keep_set.add(v)
             df_f = df_f[df_f["End Date"].isin(keep_set)]
+        if self.has_enabled_toggle and self.enabled_only_var.get():
+            if "Enabled_F" in df_f.columns:
+                df_f = df_f[df_f["Enabled_F"] == "Enabled"]
         return df_f
     def on_col_click(self, col_name: str):
         if col_name in self.FILTERABLE:
@@ -1503,12 +1516,12 @@ class MainApp(ctk.CTk):
         self.tabs.add(self.tab_paths, text="Paths")
         e_cfg = self.config_dict.get("xrp_grid", {})
         self.tab_xrp = ctk.CTkFrame(self.tabs)
-        self.xrp_preview = SimplePreview(self.tab_xrp, "XRP", e_cfg)
+        self.xrp_preview = SimplePreview(self.tab_xrp, "XRP", e_cfg, has_enabled_toggle=True)
         self.xrp_preview.pack(fill="both", expand=True)
         self.tabs.add(self.tab_xrp, text="XRP Preview")
         m_cfg = self.config_dict.get("master_grid", {})
         self.tab_master = ctk.CTkFrame(self.tabs)
-        self.master_preview = SimplePreview(self.tab_master, "Master", m_cfg)
+        self.master_preview = SimplePreview(self.tab_master, "Master", m_cfg, has_enabled_toggle=False)
         self.master_preview.pack(fill="both", expand=True)
         self.tabs.add(self.tab_master, text="Master Preview")
         self.tab_compare = ctk.CTkFrame(self.tabs)
