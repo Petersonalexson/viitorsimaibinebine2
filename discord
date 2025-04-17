@@ -1,0 +1,948 @@
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Tuple, Dict, Optional, Any
+import webbrowser
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import customtkinter as ctk
+
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+REPORT_FILES = {
+    "groupGameReport": {
+        "cols": ["User", "Game", "ACTIVATE", "moderator", "Date"],
+        "key": ["User", "ACTIVATE"],
+        "desc": "Group Game Assignments"
+    },
+    "roleVideoReport": {
+        "cols": ["Name", "Type", "ACTIVATE2", "moderator", "Date"],
+        "key": ["Name", "ACTIVATE2"],
+        "desc": "Role Video Access"
+    },
+    "roleReport": {
+        "cols": ["User Login", "First nAME", "Last Name", "Email", "Role", "Granted"],
+        "key": ["User Login", "Role"],
+        "desc": "User Role Assignments"
+    },
+    "userVideoReport": {
+        "cols": ["User Name", "IP", "Access Date and time"],
+        "key": ["User Name"],
+        "desc": "User Video Activity"
+    },
+    "userReport": {
+        "cols": ["User", "First Name", "Last Name", "Email", "Direct", "Group"],
+        "key": ["User", "Group"],
+        "desc": "User Account Info"
+    },
+}
+
+COLORS = {
+    "primary": "#1a5276",
+    "secondary": "#2980b9",
+    "accent": "#f39c12",
+    "warning": "#f1c40f",
+    "danger": "#e74c3c",
+    "success": "#2ecc71",
+    "light": "#ecf0f1",
+    "dark": "#2c3e50",
+    "gray": "#95a5a6",
+    "white": "#ffffff",
+    "black": "#000000",
+}
+
+EXCEL_STYLES = {
+    "title": {
+        "bold": True,
+        "font_size": 14,
+        "align": "center",
+        "valign": "vcenter",
+        "font_color": COLORS["primary"],
+    },
+    "subtitle": {
+        "italic": True,
+        "align": "center",
+        "valign": "vcenter",
+        "font_color": COLORS["secondary"],
+    },
+    "header": {
+        "bold": True,
+        "text_wrap": True,
+        "valign": "top",
+        "fg_color": "#D7E4BC",
+        "border": 1,
+    },
+    "warning": {
+        "bg_color": COLORS["warning"],
+        "font_color": "#7D6608",
+    },
+    "danger": {
+        "bg_color": COLORS["danger"],
+        "font_color": "#FFFFFF",
+    },
+}
+
+def find_header_row(path: Path, expected_cols: List[str], max_rows: int = 30) -> int:
+    try:
+        df = pd.read_excel(path, header=None, nrows=max_rows)
+        expected_lower = [col.lower().strip() for col in expected_cols]
+        for idx, row in df.iterrows():
+            row_values = [str(val).lower().strip() if not pd.isna(val) else "" for val in row]
+            if all(any(exp in val for val in row_values) for exp in expected_lower):
+                return idx
+    except Exception as e:
+        raise ValueError(f"Error reading {path}: {str(e)}")
+    raise ValueError(f"Header with columns {expected_cols} not found in {path}")
+
+def load_report(path: Path, spec: Dict[str, Any]) -> pd.DataFrame:
+    try:
+        header_row = find_header_row(path, spec["cols"])
+        df = pd.read_excel(path, header=header_row)
+        col_mapping = {}
+        for expected_col in spec["cols"]:
+            for col in df.columns:
+                if expected_col.lower().strip() == str(col).lower().strip():
+                    col_mapping[col] = expected_col
+                    break
+        df = df.rename(columns=col_mapping)
+        missing_cols = set(spec["cols"]) - set(df.columns)
+        if missing_cols:
+            raise ValueError(f"Missing columns in {path}: {missing_cols}")
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                try:
+                    numeric_check = pd.to_numeric(df[col], errors='coerce')
+                    if numeric_check.notna().sum() > 0.5 * len(df):
+                        df[col] = numeric_check
+                except:
+                    pass
+        for col in df.columns:
+            if 'date' in col.lower() or 'time' in col.lower():
+                try:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                except:
+                    pass
+        return df[spec["cols"]]
+    except Exception as e:
+        raise ValueError(f"Error processing {path}: {str(e)}")
+
+def merge_diff(prev: pd.DataFrame, curr: pd.DataFrame, key: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    prev_comp = prev.copy()
+    curr_comp = curr.copy()
+    for df in [prev_comp, curr_comp]:
+        for col in df.columns:
+            if df[col].dtype != 'object':
+                df[col] = df[col].astype(str)
+    merged = curr_comp.merge(prev_comp, on=key, how="outer", indicator=True)
+    added_idx = merged[merged["_merge"] == "left_only"].index
+    removed_idx = merged[merged["_merge"] == "right_only"].index
+    added = curr.loc[added_idx] if not added_idx.empty else pd.DataFrame(columns=curr.columns)
+    removed = prev.loc[removed_idx] if not removed_idx.empty else pd.DataFrame(columns=prev.columns)
+    return added, removed
+
+def format_excel(writer, sheet_name, df):
+    workbook = writer.book
+    worksheet = writer.sheets[sheet_name]
+    header_format = workbook.add_format(EXCEL_STYLES["header"])
+    warning_format = workbook.add_format(EXCEL_STYLES["warning"])
+    danger_format = workbook.add_format(EXCEL_STYLES["danger"])
+    for col_num, value in enumerate(df.columns.values):
+        worksheet.write(0, col_num, value, header_format)
+    for i, col in enumerate(df.columns):
+        max_len = max(df[col].astype(str).map(len).max(), len(str(col))) + 2
+        max_len = min(max_len, 50)
+        worksheet.set_column(i, i, max_len)
+    if 'inactive' in sheet_name.lower():
+        days_col = df.columns.get_loc('DaysSince') if 'DaysSince' in df.columns else None
+        if days_col is not None:
+            worksheet.conditional_format(1, days_col, len(df)+1, days_col, {
+                'type': 'cell', 'criteria': 'between',
+                'minimum': 15, 'maximum': 30,
+                'format': warning_format
+            })
+            worksheet.conditional_format(1, days_col, len(df)+1, days_col, {
+                'type': 'cell', 'criteria': '>',
+                'value': 30, 'format': danger_format
+            })
+    worksheet.conditional_format(1, 0, len(df), len(df.columns)-1, {
+        'type': 'formula', 'criteria': '=MOD(ROW(),2)=0',
+        'format': workbook.add_format({'bg_color': '#F8F8F8'})
+    })
+
+class GameGroupAnalyser:
+    def __init__(self, root_folder: Path):
+        self.root = root_folder
+        self.today_path, self.yesterday_path = self._locate_latest_dates()
+        self.results: Dict[str, Dict[str, pd.DataFrame]] = {}
+        self.stats: Dict[str, Dict[str, int]] = {}
+
+    def _locate_latest_dates(self) -> Tuple[Path, Path]:
+        dates = []
+        for year_dir in self.root.iterdir():
+            if not year_dir.is_dir() or not year_dir.name.isdigit():
+                continue
+            for month_dir in year_dir.iterdir():
+                if not month_dir.is_dir() or len(month_dir.name) != 2:
+                    continue
+                for day_dir in month_dir.iterdir():
+                    if not day_dir.is_dir() or len(day_dir.name) != 2:
+                        continue
+                    try:
+                        dt = datetime(int(year_dir.name), int(month_dir.name), int(day_dir.name))
+                        dates.append((dt, day_dir))
+                    except ValueError:
+                        pass
+        dates.sort(key=lambda x: x[0])
+        if len(dates) < 2:
+            raise RuntimeError("Need at least two daily folders to compare.")
+        today, yesterday = dates[-1][1], dates[-2][1]
+        print(f"Comparing {today} (today) with {yesterday} (yesterday)")
+        return today, yesterday
+
+    def analyse(self):
+        for r_name, spec in REPORT_FILES.items():
+            self.stats[r_name] = {"added": 0, "removed": 0, "inactive_15": 0, "inactive_30": 0}
+            if r_name == "userVideoReport":
+                self._analyse_inactivity(r_name, spec)
+                continue
+            prev_file = self.yesterday_path / f"{r_name}.xlsx"
+            curr_file = self.today_path / f"{r_name}.xlsx"
+            if not (prev_file.exists() and curr_file.exists()):
+                print(f"Skipping {r_name}: files not found")
+                continue
+            try:
+                prev_df = load_report(prev_file, spec)
+                curr_df = load_report(curr_file, spec)
+                prev_timestamp = self._get_folder_date(self.yesterday_path)
+                curr_timestamp = self._get_folder_date(self.today_path)
+                prev_df['Report Date'] = prev_timestamp
+                curr_df['Report Date'] = curr_timestamp
+                added, removed = merge_diff(prev_df, curr_df, spec["key"])
+                self.results[r_name] = {"added": added, "removed": removed}
+                self.stats[r_name]["added"] = len(added)
+                self.stats[r_name]["removed"] = len(removed)
+                print(f"{r_name}: {len(added)} added, {len(removed)} removed")
+            except Exception as e:
+                print(f"Error analyzing {r_name}: {e}")
+                messagebox.showwarning("Analysis Warning", f"Error analyzing {r_name}: {e}")
+
+    def _get_folder_date(self, folder_path: Path) -> str:
+        parts = list(folder_path.parts)
+        if len(parts) >= 3:
+            try:
+                year, month, day = parts[-3], parts[-2], parts[-1]
+                return f"{year}-{month}-{day}"
+            except:
+                pass
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _analyse_inactivity(self, r_name: str, spec: Dict[str, Any]):
+        file_path = self.today_path / f"{r_name}.xlsx"
+        if not file_path.exists():
+            print(f"Skipping {r_name}: file not found")
+            return
+        try:
+            df = load_report(file_path, spec)
+            date_col = "Access Date and time"
+            if date_col in df.columns:
+                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+                last_seen = df.groupby("User Name")[date_col].max().reset_index()
+                current_date = datetime.now()
+                last_seen["DaysSince"] = (current_date - last_seen[date_col]).dt.days
+                yellow = last_seen[(last_seen["DaysSince"] > 15) & (last_seen["DaysSince"] <= 30)]
+                red = last_seen[last_seen["DaysSince"] > 30]
+                self.results[r_name] = {"inactive_15": yellow, "inactive_30": red}
+                self.stats[r_name]["inactive_15"] = len(yellow)
+                self.stats[r_name]["inactive_30"] = len(red)
+                print(f"{r_name}: {len(yellow)} users inactive >15 days, {len(red)} users inactive >30 days")
+            else:
+                print(f"Warning: Date column '{date_col}' not found in {r_name}")
+        except Exception as e:
+            print(f"Error analyzing inactivity for {r_name}: {e}")
+            messagebox.showwarning("Analysis Warning", f"Error analyzing inactivity for {r_name}: {e}")
+
+    def export_summary(self, out_path: Path) -> bool:
+        try:
+            with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
+                self._create_summary_sheet(writer)
+                for r_name, detail in self.results.items():
+                    for sub_name, df in detail.items():
+                        if df.empty:
+                            continue
+                        sheet = f"{r_name}_{sub_name}"[:31]
+                        df.to_excel(writer, sheet_name=sheet, index=False)
+                        format_excel(writer, sheet, df)
+            return True
+        except Exception as e:
+            print(f"Error exporting summary: {e}")
+            messagebox.showerror("Export Error", f"Failed to export summary: {e}")
+            return False
+
+    def _create_summary_sheet(self, writer):
+        summary_data = []
+        for r_name, spec in REPORT_FILES.items():
+            stats = self.stats.get(r_name, {})
+            row = {
+                'Report': r_name,
+                'Description': spec.get('desc', r_name),
+                'Added': stats.get('added', 0),
+                'Removed': stats.get('removed', 0),
+                'Inactive (15-30d)': stats.get('inactive_15', 0),
+                'Inactive (>30d)': stats.get('inactive_30', 0),
+            }
+            summary_data.append(row)
+        summary_df = pd.DataFrame(summary_data)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        date_range = (
+            f"Comparing: {self._get_folder_date(self.today_path)} vs "
+            f"{self._get_folder_date(self.yesterday_path)}"
+        )
+        summary_df.to_excel(writer, sheet_name='Summary', index=False, startrow=3)
+        worksheet = writer.sheets['Summary']
+        workbook = writer.book
+        title_format = workbook.add_format(EXCEL_STYLES["title"])
+        subtitle_format = workbook.add_format(EXCEL_STYLES["subtitle"])
+        header_format = workbook.add_format(EXCEL_STYLES["header"])
+        worksheet.merge_range('A1:F1', 'Game Group Daily Tracker - Summary', title_format)
+        worksheet.merge_range('A2:F2', date_range, subtitle_format)
+        worksheet.merge_range('A3:F3', f'Generated: {timestamp}', subtitle_format)
+        for col_num, value in enumerate(summary_df.columns.values):
+            worksheet.write(3, col_num, value, header_format)
+        worksheet.set_column('A:A', 18)
+        worksheet.set_column('B:B', 30)
+        worksheet.set_column('C:F', 15)
+        for col in ['C', 'D', 'E', 'F']:
+            worksheet.conditional_format(f'{col}5:{col}{len(summary_data)+4}', {
+                'type': '3_color_scale',
+                'min_color': '#FFFFFF',
+                'mid_color': '#FFEB9C',
+                'max_color': '#FFC7CE',
+            })
+
+class ChartGenerator:
+    def __init__(self, analyser: GameGroupAnalyser):
+        self.analyser = analyser
+        plt.style.use('ggplot')
+
+    def create_summary_bar_chart(self, frame):
+        reports, added, removed = [], [], []
+        for r_name, stats in self.analyser.stats.items():
+            if stats.get('added', 0) > 0 or stats.get('removed', 0) > 0:
+                reports.append(REPORT_FILES.get(r_name, {}).get('desc', r_name))
+                added.append(stats.get('added', 0))
+                removed.append(stats.get('removed', 0))
+        if not reports:
+            ctk.CTkLabel(frame, text="No changes detected", font=("Segoe UI", 12)).pack(pady=50)
+            return None
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=100)
+        x = np.arange(len(reports))
+        width = 0.35
+        ax.bar(x - width/2, added, width, label='Added', color=COLORS['success'])
+        ax.bar(x + width/2, removed, width, label='Removed', color=COLORS['danger'])
+        ax.set_xlabel('Report Type', fontsize=10)
+        ax.set_ylabel('Count', fontsize=10)
+        ax.set_title('Changes Summary', fontsize=12, fontweight='bold', color=COLORS['primary'])
+        ax.set_xticks(x)
+        ax.set_xticklabels(reports, rotation=45, ha='right', fontsize=9)
+        ax.legend(loc='best')
+        ax.grid(True, linestyle='--', alpha=0.7)
+        for i, v in enumerate(added):
+            if v > 0:
+                ax.text(i - width/2, v + 0.5, str(v), ha='center', fontsize=9)
+        for i, v in enumerate(removed):
+            if v > 0:
+                ax.text(i + width/2, v + 0.5, str(v), ha='center', fontsize=9)
+        plt.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        return canvas
+
+    def create_inactivity_pie_chart(self, frame):
+        stats = self.analyser.stats.get('userVideoReport', {})
+        inactive_15 = stats.get('inactive_15', 0)
+        inactive_30 = stats.get('inactive_30', 0)
+        if inactive_15 == 0 and inactive_30 == 0:
+            ctk.CTkLabel(frame, text="No inactive users detected", font=("Segoe UI", 12)).pack(pady=50)
+            return None
+        labels = ['Inactive 15-30 days', 'Inactive >30 days']
+        sizes = [inactive_15, inactive_30]
+        colors = [COLORS['warning'], COLORS['danger']]
+        explode = (0, 0.1)
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
+        wedges, texts, autotexts = ax.pie(
+            sizes, explode=explode, labels=labels, colors=colors,
+            autopct='%1.1f%%', shadow=True, startangle=90,
+            textprops={'fontsize': 9}
+        )
+        for autotext in autotexts:
+            autotext.set_color('white')
+            autotext.set_fontsize(9)
+            autotext.set_fontweight('bold')
+        ax.axis('equal')
+        ax.set_title('User Inactivity', fontsize=12, fontweight='bold', color=COLORS['primary'])
+        total = inactive_15 + inactive_30
+        ax.annotate(f'Total Inactive: {total}',
+                    xy=(0.5, 0.05), xycoords='figure fraction',
+                    ha='center', fontsize=10,
+                    bbox=dict(boxstyle="round,pad=0.3", fc=COLORS['light'], ec=COLORS['gray']))
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        return canvas
+
+    def create_stacked_bar_chart(self, frame):
+        reports, added_vals, removed_vals, inactive_15_vals, inactive_30_vals = [], [], [], [], []
+        for r_name, stats in self.analyser.stats.items():
+            reports.append(REPORT_FILES.get(r_name, {}).get('desc', r_name))
+            added_vals.append(stats.get('added', 0))
+            removed_vals.append(stats.get('removed', 0))
+            inactive_15_vals.append(stats.get('inactive_15', 0))
+            inactive_30_vals.append(stats.get('inactive_30', 0))
+        if not any(added_vals + removed_vals + inactive_15_vals + inactive_30_vals):
+            ctk.CTkLabel(frame, text="No data to display", font=("Segoe UI", 12)).pack(pady=50)
+            return None
+        fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+        x = np.arange(len(reports))
+        width = 0.6
+        ax.bar(x, added_vals, width, label='Added', color=COLORS['success'])
+        ax.bar(x, removed_vals, width, bottom=added_vals, label='Removed', color=COLORS['danger'])
+        inactive_bottom = [a + r for a, r in zip(added_vals, removed_vals)]
+        ax.bar(x, inactive_15_vals, width, bottom=inactive_bottom, label='Inactive 15-30d', color=COLORS['warning'])
+        inactive_15_bottom = [a + b + c for a, b, c in zip(added_vals, removed_vals, inactive_15_vals)]
+        ax.bar(x, inactive_30_vals, width, bottom=inactive_15_bottom, label='Inactive >30d', color=COLORS['danger'])
+        ax.set_xlabel('Report Type', fontsize=10)
+        ax.set_ylabel('Count', fontsize=10)
+        ax.set_title('All Metrics Summary', fontsize=12, fontweight='bold', color=COLORS['primary'])
+        ax.set_xticks(x)
+        ax.set_xticklabels(reports, rotation=45, ha='right', fontsize=9)
+        ax.legend(loc='best')
+        ax.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        return canvas
+
+class Dashboard(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Game Group Daily Tracker")
+        self.geometry("1280x800")
+        self.minsize(900, 600)
+        self.analyser: Optional[GameGroupAnalyser] = None
+        self.chart_gen: Optional[ChartGenerator] = None
+        self.summary_file: Optional[Path] = None
+        try:
+            self.iconbitmap('icon.ico')
+        except:
+            pass
+        self._build_ui()
+        self._load_config()
+
+    def _build_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        header_frame = ctk.CTkFrame(self)
+        header_frame.grid(row=0, column=0, padx=10, pady=(10, 0), sticky="ew")
+        header_frame.grid_columnconfigure(0, weight=1)
+        title_label = ctk.CTkLabel(
+            header_frame,
+            text="Game Group Daily Tracker",
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        title_label.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        theme_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
+        theme_frame.grid(row=0, column=1, padx=10, pady=10, sticky="e")
+        ctk.CTkLabel(theme_frame, text="Appearance:").pack(side="left", padx=5)
+        theme_options = ["System", "Light", "Dark"]
+        theme_var = ctk.StringVar(value=ctk.get_appearance_mode())
+        def change_theme(new_theme):
+            ctk.set_appearance_mode(new_theme)
+        theme_menu = ctk.CTkOptionMenu(
+            theme_frame,
+            values=theme_options,
+            variable=theme_var,
+            command=change_theme
+        )
+        theme_menu.pack(side="left", padx=5)
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+        self.tab_config = self.tabview.add("Configuration")
+        self.tab_dashboard = self.tabview.add("Dashboard")
+        self.tab_details = self.tabview.add("Detailed Results")
+        self.tab_help = self.tabview.add("Help")
+        self.tabview.set("Configuration")
+        self._build_config_tab()
+        self._build_dashboard_tab()
+        self._build_details_tab()
+        self._build_help_tab()
+        self.status_var = ctk.StringVar(value="Ready")
+        status_bar = ctk.CTkLabel(
+            self,
+            textvariable=self.status_var,
+            anchor="w",
+            height=25,
+            corner_radius=5,
+            fg_color=COLORS["gray"],
+            text_color=COLORS["white"]
+        )
+        status_bar.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+
+    def _build_config_tab(self):
+        self.tab_config.grid_columnconfigure(0, weight=1)
+        folder_frame = ctk.CTkFrame(self.tab_config)
+        folder_frame.grid(row=0, column=0, padx=20, pady=20, sticky="ew")
+        folder_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            folder_frame,
+            text="Data Location",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).grid(row=0, column=0, columnspan=3, padx=10, pady=(10, 5), sticky="w")
+        ctk.CTkLabel(
+            folder_frame,
+            text="Select the root folder containing the year/month/day structure with daily report files.",
+            text_color=COLORS["gray"]
+        ).grid(row=1, column=0, columnspan=3, padx=10, pady=(0, 10), sticky="w")
+        ctk.CTkLabel(folder_frame, text="Root folder:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
+        self.folder_var = ctk.StringVar()
+        folder_entry = ctk.CTkEntry(folder_frame, textvariable=self.folder_var, width=400)
+        folder_entry.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
+        browse_btn = ctk.CTkButton(folder_frame, text="Browse", command=self._browse, width=100)
+        browse_btn.grid(row=2, column=2, padx=10, pady=10, sticky="e")
+        actions_frame = ctk.CTkFrame(self.tab_config)
+        actions_frame.grid(row=1, column=0, padx=20, pady=20, sticky="ew")
+        run_button = ctk.CTkButton(
+            actions_frame,
+            text="Run Analysis",
+            command=self._run,
+            font=ctk.CTkFont(size=14),
+            height=40,
+            fg_color=COLORS["primary"],
+            hover_color=COLORS["secondary"]
+        )
+        run_button.pack(side="left", padx=20, pady=20)
+        export_button = ctk.CTkButton(
+            actions_frame,
+            text="Export Results",
+            command=self._export,
+            font=ctk.CTkFont(size=14),
+            height=40,
+            fg_color=COLORS["accent"],
+            hover_color="#e67e22",
+            text_color=COLORS["dark"]
+        )
+        export_button.pack(side="left", padx=20, pady=20)
+        self.view_button = ctk.CTkButton(
+            actions_frame,
+            text="View Last Export",
+            command=self._view_export,
+            font=ctk.CTkFont(size=14),
+            height=40,
+            fg_color=COLORS["gray"],
+            hover_color="#7f8c8d",
+            state="disabled"
+        )
+        self.view_button.pack(side="left", padx=20, pady=20)
+
+    def _build_dashboard_tab(self):
+        self.tab_dashboard.grid_columnconfigure(0, weight=1)
+        self.tab_dashboard.grid_rowconfigure(1, weight=1)
+        header_frame = ctk.CTkFrame(self.tab_dashboard)
+        header_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
+        ctk.CTkLabel(
+            header_frame,
+            text="Dashboard Overview",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(side="left", padx=10, pady=10)
+        self.refresh_btn = ctk.CTkButton(header_frame, text="Refresh Charts", command=self._update_charts, width=120)
+        self.refresh_btn.pack(side="right", padx=10, pady=10)
+        self.charts_frame = ctk.CTkFrame(self.tab_dashboard)
+        self.charts_frame.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        self.charts_frame.grid_columnconfigure((0, 1), weight=1)
+        self.charts_frame.grid_rowconfigure((0, 1), weight=1)
+        self.chart_frames = {}
+        self.chart_frames["changes"] = ctk.CTkFrame(self.charts_frame)
+        self.chart_frames["changes"].grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        changes_header = ctk.CTkFrame(self.chart_frames["changes"], fg_color="transparent")
+        changes_header.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(
+            changes_header,
+            text="Changes Summary",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(side="left")
+        self.changes_content = ctk.CTkFrame(self.chart_frames["changes"], fg_color="transparent")
+        self.changes_content.pack(fill="both", expand=True, padx=10, pady=5)
+        ctk.CTkLabel(
+            self.changes_content,
+            text="Run analysis to view changes",
+            text_color=COLORS["gray"]
+        ).pack(expand=True)
+        self.chart_frames["inactivity"] = ctk.CTkFrame(self.charts_frame)
+        self.chart_frames["inactivity"].grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        inactivity_header = ctk.CTkFrame(self.chart_frames["inactivity"], fg_color="transparent")
+        inactivity_header.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(
+            inactivity_header,
+            text="User Inactivity",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(side="left")
+        self.inactivity_content = ctk.CTkFrame(self.chart_frames["inactivity"], fg_color="transparent")
+        self.inactivity_content.pack(fill="both", expand=True, padx=10, pady=5)
+        ctk.CTkLabel(
+            self.inactivity_content,
+            text="Run analysis to view inactivity data",
+            text_color=COLORS["gray"]
+        ).pack(expand=True)
+        self.chart_frames["all_metrics"] = ctk.CTkFrame(self.charts_frame)
+        self.chart_frames["all_metrics"].grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+        metrics_header = ctk.CTkFrame(self.chart_frames["all_metrics"], fg_color="transparent")
+        metrics_header.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(
+            metrics_header,
+            text="All Metrics Summary",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(side="left")
+        self.metrics_content = ctk.CTkFrame(self.chart_frames["all_metrics"], fg_color="transparent")
+        self.metrics_content.pack(fill="both", expand=True, padx=10, pady=5)
+        ctk.CTkLabel(
+            self.metrics_content,
+            text="Run analysis to view comprehensive metrics",
+            text_color=COLORS["gray"]
+        ).pack(expand=True)
+
+    def _build_details_tab(self):
+        self.tab_details.grid_columnconfigure(0, weight=1)
+        self.tab_details.grid_rowconfigure(1, weight=1)
+        header_frame = ctk.CTkFrame(self.tab_details)
+        header_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
+        ctk.CTkLabel(
+            header_frame,
+            text="Detailed Results",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(side="left", padx=10, pady=10)
+        self.reports_tabview = ctk.CTkTabview(self.tab_details)
+        self.reports_tabview.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        placeholder_frame = ctk.CTkFrame(self.reports_tabview)
+        self.reports_tabview.add("No Data")
+        ctk.CTkLabel(
+            placeholder_frame,
+            text="Run analysis to view detailed results",
+            font=ctk.CTkFont(size=14),
+            text_color=COLORS["gray"]
+        ).pack(expand=True, pady=50)
+
+    def _build_help_tab(self):
+        help_scroll = ctk.CTkScrollableFrame(self.tab_help, corner_radius=0)
+        help_scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        ctk.CTkLabel(
+            help_scroll,
+            text="Game Group Daily Tracker - Help",
+            font=ctk.CTkFont(size=20, weight="bold")
+        ).pack(pady=(0, 20), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="Introduction",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(10, 5), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="This application helps you track daily changes in game group reports by comparing the latest two days of data.",
+            wraplength=800,
+            justify="left"
+        ).pack(pady=(0, 10), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="Basic Usage",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(10, 5), anchor="w")
+        usage_text = (
+            "1. Select the root folder containing your data structure (folders organized by Year/Month/Day)\n"
+            "2. Click \"Run Analysis\" to compare the latest two days\n"
+            "3. Review the dashboard charts and detailed results\n"
+            "4. Export a summary report when needed"
+        )
+        ctk.CTkLabel(
+            help_scroll,
+            text=usage_text,
+            wraplength=800,
+            justify="left"
+        ).pack(pady=(0, 10), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="Report Types",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(10, 5), anchor="w")
+        reports_text = (
+            "The application analyzes the following report types:\n\n"
+            "• Group Game Report: Tracks user game assignments (keys: User, ACTIVATE)\n"
+            "• Role Video Report: Monitors role video access changes (keys: Name, ACTIVATE2)\n"
+            "• Role Report: Tracks user role assignments (keys: User Login, Role)\n"
+            "• User Video Report: Monitors user video activity and inactivity (keys: User Name)\n"
+            "• User Report: Tracks user account changes (keys: User, Group)"
+        )
+        ctk.CTkLabel(
+            help_scroll,
+            text=reports_text,
+            wraplength=800,
+            justify="left"
+        ).pack(pady=(0, 10), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="User Inactivity Tracking",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(10, 5), anchor="w")
+        inactivity_text = (
+            "The application automatically identifies users who haven't accessed videos recently:\n\n"
+            "• Warning (Yellow): Users inactive for 15-30 days\n"
+            "• Critical (Red): Users inactive for more than 30 days\n\n"
+            "This helps you proactively manage user engagement and follow up with inactive users."
+        )
+        ctk.CTkLabel(
+            help_scroll,
+            text=inactivity_text,
+            wraplength=800,
+            justify="left"
+        ).pack(pady=(0, 10), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="Data Requirements",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(10, 5), anchor="w")
+        data_text = (
+            "The application expects:\n\n"
+            "1. A folder structure organized as: Year/Month/Day (e.g., 2023/05/25)\n"
+            "2. Excel files (.xlsx) in each day folder, named according to the report types\n"
+            "3. Reports must contain the expected columns, but they can appear in any row\n"
+            "4. The application will handle case-insensitive column matching and numeric values stored as text"
+        )
+        ctk.CTkLabel(
+            help_scroll,
+            text=data_text,
+            wraplength=800,
+            justify="left"
+        ).pack(pady=(0, 10), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="Support",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=(10, 5), anchor="w")
+        ctk.CTkLabel(
+            help_scroll,
+            text="For any issues or questions, please contact your system administrator.",
+            wraplength=800,
+            justify="left"
+        ).pack(pady=(0, 10), anchor="w")
+
+    def _browse(self):
+        path = filedialog.askdirectory(title="Select Data Root Folder")
+        if path:
+            self.folder_var.set(path)
+            self._save_config()
+
+    def _run(self):
+        root_path = self.folder_var.get()
+        if not root_path:
+            messagebox.showerror("Error", "Please select the root folder of your reports")
+            return
+        self.status_var.set("Running analysis...")
+        self.update_idletasks()
+        try:
+            self.analyser = GameGroupAnalyser(Path(root_path))
+            self.analyser.analyse()
+            self.chart_gen = ChartGenerator(self.analyser)
+            self._populate_results()
+            self._update_charts()
+            self.status_var.set("Analysis complete")
+            self.tabview.set("Dashboard")
+        except Exception as exc:
+            self.status_var.set(f"Error: {str(exc)}")
+            messagebox.showerror("Analysis Error", str(exc))
+
+    def _update_charts(self):
+        if not self.chart_gen:
+            return
+        for frame in [self.changes_content, self.inactivity_content, self.metrics_content]:
+            for widget in frame.winfo_children():
+                widget.destroy()
+        self.chart_gen.create_summary_bar_chart(self.changes_content)
+        self.chart_gen.create_inactivity_pie_chart(self.inactivity_content)
+        self.chart_gen.create_stacked_bar_chart(self.metrics_content)
+
+    def _populate_results(self):
+        for tab in list(self.reports_tabview._tab_dict.keys()):
+            if tab != "No Data":
+                self.reports_tabview._tab_dict[tab].destroy()
+        if "No Data" in self.reports_tabview._tab_dict:
+            self.reports_tabview._tab_dict["No Data"].pack_forget()
+        if not self.analyser or not self.analyser.results:
+            return
+        if "No Data" in self.reports_tabview._tab_dict:
+            self.reports_tabview._tab_dict["No Data"].destroy()
+            del self.reports_tabview._tab_dict["No Data"]
+        for r_name, detail in self.analyser.results.items():
+            desc = REPORT_FILES.get(r_name, {}).get('desc', r_name)
+            report_tab = self.reports_tabview.add(desc)
+            report_tab.grid_columnconfigure(0, weight=1)
+            report_tab.grid_rowconfigure(0, weight=1)
+            detail_tabview = ctk.CTkTabview(report_tab)
+            detail_tabview.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+            for sub_name, df in detail.items():
+                if df.empty:
+                    continue
+                detail_name = sub_name.replace('_', ' ').title()
+                sub_tab = detail_tabview.add(detail_name)
+                sub_tab.grid_columnconfigure(0, weight=1)
+                sub_tab.grid_rowconfigure(1, weight=1)
+                filter_frame = ctk.CTkFrame(sub_tab)
+                filter_frame.grid(row=0, column=0, padx=10, pady=(10, 5), sticky="ew")
+                ctk.CTkLabel(filter_frame, text="Filter:").pack(side="left", padx=5, pady=5)
+                filter_var = ctk.StringVar()
+                filter_entry = ctk.CTkEntry(filter_frame, textvariable=filter_var, width=200)
+                filter_entry.pack(side="left", padx=5, pady=5)
+                table_frame = ctk.CTkFrame(sub_tab)
+                table_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
+                columns = list(df.columns)
+                tree = ttk.Treeview(table_frame, columns=columns, show="headings")
+                vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+                hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+                tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+                tree.grid(column=0, row=0, sticky="nsew")
+                vsb.grid(column=1, row=0, sticky="ns")
+                hsb.grid(column=0, row=1, sticky="ew")
+                table_frame.columnconfigure(0, weight=1)
+                table_frame.rowconfigure(0, weight=1)
+                for col in columns:
+                    tree.heading(col, text=col)
+                    col_width = max(df[col].astype(str).map(len).max() * 10, len(str(col)) * 10)
+                    col_width = min(col_width, 300)
+                    tree.column(col, width=col_width, minwidth=50)
+                for _, row in df.iterrows():
+                    tree.insert("", "end", values=[str(row[col]) for col in columns])
+                ctk.CTkButton(
+                    filter_frame,
+                    text="Apply Filter",
+                    command=lambda t=tree, d=df, fv=filter_var: self._apply_filter(t, d, fv.get())
+                ).pack(side="left", padx=5, pady=5)
+                ctk.CTkButton(
+                    filter_frame,
+                    text="Clear Filter",
+                    command=lambda t=tree, d=df, fv=filter_var: self._clear_filter(t, d, fv)
+                ).pack(side="left", padx=5, pady=5)
+                count_label = ctk.CTkLabel(
+                    filter_frame,
+                    text=f"Records: {len(df)}",
+                    text_color=COLORS["gray"]
+                )
+                count_label.pack(side="right", padx=10, pady=5)
+        if self.reports_tabview._tab_dict:
+            first_tab = list(self.reports_tabview._tab_dict.keys())[0]
+            self.reports_tabview.set(first_tab)
+
+    def _apply_filter(self, tree, df, filter_text):
+        if not filter_text:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        filter_lower = filter_text.lower()
+        for _, row in df.iterrows():
+            if any(filter_lower in str(val).lower() for val in row):
+                tree.insert("", "end", values=[str(row[col]) for col in df.columns])
+
+    def _clear_filter(self, tree, df, filter_var):
+        filter_var.set("")
+        for item in tree.get_children():
+            tree.delete(item)
+        for _, row in df.iterrows():
+            tree.insert("", "end", values=[str(row[col]) for col in df.columns])
+
+    def _export(self):
+        if not self.analyser:
+            messagebox.showerror("Error", "Run analysis first")
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"GameGroup_Summary_{timestamp}.xlsx"
+        file_path = filedialog.asksaveasfilename(
+            title="Save Summary Report",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=filename
+        )
+        if not file_path:
+            return
+        self.status_var.set("Exporting summary...")
+        self.update_idletasks()
+        try:
+            success = self.analyser.export_summary(Path(file_path))
+            if success:
+                self.summary_file = Path(file_path)
+                self.view_button.configure(state="normal", fg_color=COLORS["accent"], text_color=COLORS["dark"])
+                self.status_var.set(f"Summary exported to {file_path}")
+                messagebox.showinfo("Export Complete", f"Summary exported to {file_path}")
+            else:
+                self.status_var.set("Export failed")
+        except Exception as e:
+            self.status_var.set(f"Export error: {str(e)}")
+            messagebox.showerror("Export Error", str(e))
+
+    def _view_export(self):
+        if not self.summary_file or not self.summary_file.exists():
+            messagebox.showerror("Error", "Export file not found")
+            return
+        try:
+            if sys.platform == 'win32':
+                os.startfile(self.summary_file)
+            elif sys.platform == 'darwin':
+                os.system(f"open '{self.summary_file}'")
+            else:
+                os.system(f"xdg-open '{self.summary_file}'")
+            self.status_var.set(f"Opened {self.summary_file}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open file: {str(e)}")
+
+    def _save_config(self):
+        config_dir = Path("config")
+        config_dir.mkdir(exist_ok=True)
+        config_file = config_dir / "game_group_tracker.ini"
+        try:
+            with open(config_file, "w") as f:
+                f.write(f"root_folder={self.folder_var.get()}\n")
+                f.write(f"theme={ctk.get_appearance_mode()}\n")
+            self.status_var.set(f"Configuration saved")
+        except Exception as e:
+            self.status_var.set(f"Error saving config: {str(e)}")
+
+    def _load_config(self):
+        config_file = Path("config/game_group_tracker.ini")
+        if config_file.exists():
+            try:
+                with open(config_file, "r") as f:
+                    for line in f:
+                        if line.startswith("root_folder="):
+                            folder = line.split("=", 1)[1].strip()
+                            if os.path.isdir(folder):
+                                self.folder_var.set(folder)
+                        elif line.startswith("theme="):
+                            theme = line.split("=", 1)[1].strip()
+                            if theme in ["System", "Light", "Dark"]:
+                                ctk.set_appearance_mode(theme)
+                self.status_var.set("Configuration loaded")
+            except Exception as e:
+                self.status_var.set(f"Error loading config: {str(e)}")
+
+def main():
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GameGroupTracker")
+    app = Dashboard()
+    app.mainloop()
+
+if __name__ == "__main__":
+    main()
