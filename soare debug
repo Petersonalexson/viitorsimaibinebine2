@@ -1,0 +1,43 @@
+def compare_name_first(xrp_long: pd.DataFrame, mast_long: pd.DataFrame, trim_key=False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    # Add debug logging
+    logging.info(f"STARTING COMPARISON - XRP has {len(xrp_long)} rows, Master has {len(mast_long)} rows")
+    
+    # Print Coco dimension debug info
+    coco_xrp = xrp_long[xrp_long['Dimension'] == 'Coco']
+    coco_master = mast_long[mast_long['Dimension'] == 'Coco']
+    
+    if not coco_xrp.empty:
+        logging.info(f"COCO in XRP: {len(coco_xrp)} rows")
+        logging.info(f"COCO Names in XRP: {sorted(coco_xrp['Name'].unique().tolist())}")
+    else:
+        logging.info("COCO not found in XRP")
+        
+    if not coco_master.empty:
+        logging.info(f"COCO in Master: {len(coco_master)} rows")
+        logging.info(f"COCO Names in Master: {sorted(coco_master['Name'].unique().tolist())}")
+    else:
+        logging.info("COCO not found in Master")
+    
+    # If Coco exists in both, check attribute values
+    if not coco_xrp.empty and not coco_master.empty:
+        common_names = set(coco_xrp['Name'].unique()) & set(coco_master['Name'].unique())
+        logging.info(f"Common COCO Names: {sorted(list(common_names))}")
+        
+        # For each common name, check each attribute value
+        for name in common_names:
+            logging.info(f"Examining COCO - {name}")
+            xrp_attrs = coco_xrp[coco_xrp['Name'] == name].set_index('Attribute')['Value'].to_dict()
+            master_attrs = coco_master[coco_master['Name'] == name].set_index('Attribute')['Value'].to_dict()
+            
+            all_attrs = set(xrp_attrs.keys()) | set(master_attrs.keys())
+            for attr in all_attrs:
+                xrp_val = xrp_attrs.get(attr, "NOT PRESENT")
+                master_val = master_attrs.get(attr, "NOT PRESENT")
+                logging.info(f"  {attr}: XRP={xrp_val} ({type(xrp_val)}), Master={master_val} ({type(master_val)})")
+                
+                # Test string comparison
+                if xrp_val != "NOT PRESENT" and master_val != "NOT PRESENT":
+                    str_xrp = str(xrp_val).strip().lower()
+                    str_master = str(master_val).strip().lower()
+                    logging.info(f"    After string conversion: '{str_xrp}' vs '{str_master}' - Equal: {str_xrp == str_master}")
+    
